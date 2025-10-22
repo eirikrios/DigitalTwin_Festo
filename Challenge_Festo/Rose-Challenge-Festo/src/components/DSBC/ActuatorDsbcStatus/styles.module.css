@@ -1,0 +1,14 @@
+.sim-panel { padding: 8px; }
+.sim-panel h2 { color:#0aa1ff; margin-bottom:8px; }
+.row { margin: 8px 0; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+.row input { width:120px; padding:6px 8px; border:1px solid #cfd7de; border-radius:8px; }
+.start-btn { padding:8px 14px; border-radius:999px; border:0; background:#12b886; color:white; cursor:pointer; }
+.hint { color:#768390; font-size:12px; margin-top:-4px; }
+.lights { display:flex; gap:24px; margin-top:10px; }
+.light { width:40px; height:40px; border-radius:999px; background:#ddd; box-shadow: inset 0 0 0 2px #c7c7c7; }
+.light.ok { background:#93f59a; }
+.light.warn { background:#ffd89a; }
+.light.fail { background:#ff5b5b; }
+.light.off { background:#e6e6e6; }
+.legend { display:flex; gap:60px; color:#6b7785; margin-top:6px; }
+.row.tiny { color:#6b7785; font-size:12px; }

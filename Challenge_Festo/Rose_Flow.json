@@ -1,0 +1,199 @@
+[
+    {
+        "id": "9bbf5a29dc9413b2",
+        "type": "tab",
+        "label": "Simulação",
+        "disabled": false,
+        "info": "",
+        "env": []
+    },
+    {
+        "id": "bff395e857a39726",
+        "type": "inject",
+        "z": "9bbf5a29dc9413b2",
+        "name": "SimularLeitura",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "1",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "iso",
+        "payloadType": "date",
+        "x": 420,
+        "y": 520,
+        "wires": [
+            [
+                "db62d194a935e35d"
+            ]
+        ]
+    },
+    {
+        "id": "bd13a3429a66527e",
+        "type": "http request",
+        "z": "9bbf5a29dc9413b2",
+        "name": "Enviar para Backend Flask",
+        "method": "POST",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "http://127.0.0.1:5000/api/opcua/readings",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [
+            {
+                "keyType": "Content-Type",
+                "keyValue": "",
+                "valueType": "application/json",
+                "valueValue": ""
+            }
+        ],
+        "x": 1120,
+        "y": 520,
+        "wires": [
+            [
+                "ee09506590df49f2"
+            ]
+        ]
+    },
+    {
+        "id": "ee09506590df49f2",
+        "type": "debug",
+        "z": "9bbf5a29dc9413b2",
+        "name": "Resposta do Backend",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1380,
+        "y": 520,
+        "wires": []
+    },
+    {
+        "id": "db62d194a935e35d",
+        "type": "function",
+        "z": "9bbf5a29dc9413b2",
+        "name": "Simula Atuadores Pneumáticos",
+        "func": "/*****  SIMULADOR – DSNU e DSBC (velocidade por pressão & carga)  *****/\n\n/* utilidades */\nfunction clamp(x,a,b){ return Math.max(a, Math.min(b, x)); }\nfunction jitter(x, n){ return x + (Math.random()*2*n - n); }\n\n/* ====== especificações (datasheet) ====== */\nconst DSNU = {\n  NAME: \"DSNU 20-100-PPV\",\n  STROKE_MM: 100,\n  P_MIN: 1.0, P_MAX: 10.0,\n  V_MAX: 600,                 // mm/s (ordem realista)\n  AREA_MM2: 314               // Ø20 -> π*10^2\n};\n\nconst DSBC = {\n  NAME: \"DSBC 40-180-PPV\",\n  STROKE_MM: 180,\n  P_MIN: 0.4, P_MAX: 12.0,\n  V_MAX: 1500,                // mm/s (ordem realista)\n  AREA_MM2: 1256              // Ø40 -> π*20^2\n};\n\n/* ruídos evidentes na demo */\nconst NOISE_V = 30;           // mm/s\nconst NOISE_P = 1.0;          // bar\nconst FRICTION_BAR = 0.2;     // perdas aproximadas\n\n/* lê inputs enviados via POST /sim/input e guardados no flow */\nconst simIn = flow.get('sim_inputs') || {\n  dsnu: { pressao: 0, carga: 0 },\n  dsbc: { pressao: 0, carga: 0 }\n};\nconst P_dsnu = Number(simIn.dsnu?.pressao || 0);\nconst C_dsnu = Number(simIn.dsnu?.carga   || 0);\nconst P_dsbc = Number(simIn.dsbc?.pressao || 0);\nconst C_dsbc = Number(simIn.dsbc?.carga   || 0);\n\n/* === Física simplificada: v(pressão, carga, área) ===\n   bar_carga = 10*F[N] / A[mm²]\n   margem = P_user - bar_carga - FRICTION\n   v = Vmax * clamp((margem/(Pmax-Pmin))^0.8, 0, 1)\n*/\nfunction speedFromPressLoad(P_user_bar, Load_N, spec){\n  const bar_carga = (10 * Load_N) / spec.AREA_MM2;      // pressão para vencer a carga\n  const margem = P_user_bar - bar_carga - FRICTION_BAR; // bar disponíveis de fato\n  if (margem <= 0) return 0;\n  const frac = clamp( Math.pow(margem / (spec.P_MAX - spec.P_MIN), 0.8), 0, 1 );\n  let v = spec.V_MAX * frac;\n  v = clamp(jitter(v, NOISE_V), 0, spec.V_MAX);          // ruído em velocidade\n  return v;                                              // mm/s\n}\n\n/* máquina de estados (sincroniza avanço/recuo pelo tempo de curso) */\nfunction nextStateByVelocity(spec, key, v_mm_s){\n  let st = flow.get(key) || { state: 0, nextSwitch: 0 }; // 1=AVANÇADO, 0=RECUADO\n  const now = Date.now();\n\n  const v_safe = Math.max(v_mm_s, 1);                    // evita divisão por 0\n  const T_ms = (spec.STROKE_MM / v_safe) * 1000;         // tempo para percorrer o curso\n\n  if (!st.nextSwitch || now >= st.nextSwitch){\n    // troca o estado e agenda a próxima\n    st.state = st.state ? 0 : 1;\n    st.nextSwitch = now + T_ms;\n    flow.set(key, st);\n  }\n  return st.state;\n}\n\n/* pressões de entrada/saída sempre “próximas”,\n   invertendo qual é maior conforme o sentido */\nfunction makePressures(P_user_bar, isAdv){\n  const base  = clamp(P_user_bar, 0, 100);\n  const delta = 0.05 * base;               // ~15% de diferença\n  let pin  = isAdv ? base + delta : base - delta;\n  let pout = isAdv ? base - delta : base + delta;\n  pin  = clamp(jitter(pin,  NOISE_P), 0, 100);\n  pout = clamp(jitter(pout, NOISE_P), 0, 100);\n  return [ Number(pin.toFixed(3)), Number(pout.toFixed(3)) ];\n}\n\n/* === velocidades atuais por pressão & carga === */\nconst vDSNU = speedFromPressLoad(P_dsnu, C_dsnu, DSNU);\nconst vDSBC = speedFromPressLoad(P_dsbc, C_dsbc, DSBC);\n\n/* === estado sincronizado com a velocidade (define os tempos dos gráficos/status) === */\nconst sDSNU = nextStateByVelocity(DSNU, \"sim_state_dsnu\", vDSNU);\nconst sDSBC = nextStateByVelocity(DSBC, \"sim_state_dsbc\", vDSBC);\n\n/* === pressões de entrada/saída coerentes com o sentido === */\nconst [pinDSNU,  poutDSNU]  = makePressures(P_dsnu, !!sDSNU);\nconst [pinDSBC,  poutDSBC]  = makePressures(P_dsbc, !!sDSBC);\n\n/* === emissões (tags) – compatíveis com o seu backend/frontend === */\nconst nowIso = new Date().toISOString();\n\nmsg.payload = [\n  // DSNU\n  { tag: \"Avancado_1S2\",       node_id: \"sim.dsnu.adv\",  value: sDSNU ? 1 : 0, ts: nowIso },\n  { tag: \"Recuado_1S1\",        node_id: \"sim.dsnu.rec\",  value: sDSNU ? 0 : 1, ts: nowIso },\n  { tag: \"PressaoEntradaDSNU\", node_id: \"sim.dsnu.pin\",  value: pinDSNU,  ts: nowIso },\n  { tag: \"PressaoSaidaDSNU\",   node_id: \"sim.dsnu.pout\", value: poutDSNU, ts: nowIso },\n\n  // DSBC\n  { tag: \"Avancado_2S2\",       node_id: \"sim.dsbc.adv\",  value: sDSBC ? 1 : 0, ts: nowIso },\n  { tag: \"Recuado_2S1\",        node_id: \"sim.dsbc.rec\",  value: sDSBC ? 0 : 1, ts: nowIso },\n  { tag: \"PressaoEntradaDSBC\", node_id: \"sim.dsbc.pin\",  value: pinDSBC,  ts: nowIso },\n  { tag: \"PressaoSaidaDSBC\",   node_id: \"sim.dsbc.pout\", value: poutDSBC, ts: nowIso }\n];\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 670,
+        "y": 520,
+        "wires": [
+            [
+                "9d9d47c919142463"
+            ]
+        ]
+    },
+    {
+        "id": "9d9d47c919142463",
+        "type": "change",
+        "z": "9bbf5a29dc9413b2",
+        "name": "Change",
+        "rules": [
+            {
+                "t": "set",
+                "p": "payload",
+                "pt": "msg",
+                "to": "{\t  \"readings\": [\t    { \"tag\": \"Avancado_1S2\", \"value\": 1, \"ts\": \"2025-10-20T16:00:00\" },\t    { \"tag\": \"Recuado_1S1\", \"value\": 0, \"ts\": \"2025-10-20T16:00:00\" }\t  ]\t}\t",
+                "tot": "jsonata"
+            }
+        ],
+        "action": "",
+        "property": "",
+        "from": "",
+        "to": "",
+        "reg": false,
+        "x": 900,
+        "y": 520,
+        "wires": [
+            [
+                "bd13a3429a66527e"
+            ]
+        ]
+    },
+    {
+        "id": "d86c40ab217f1190",
+        "type": "function",
+        "z": "9bbf5a29dc9413b2",
+        "name": "Guardar Parâmetros",
+        "func": "// ================ Guardar Parâmetros ===================\n// A espera no corpo: { dsnu: { pressao, carga }, dsbc: { pressao, carga } }\n\nconst inb  = msg.payload || {};\nconst dsnu = inb.dsnu || {};\nconst dsbc = inb.dsbc || {};\n\n// saneamento\nconst Pdsnu = Number(dsnu.pressao);\nconst Cdsnu = Number(dsnu.carga);\nconst Pdsbc = Number(dsbc.pressao);\nconst Cdsbc = Number(dsbc.carga);\n\nconst safe = (v) => (isFinite(v) ? v : 0);\n\n// Salva no MESMO local que a simulação usa:\nflow.set('sim_inputs', {\n  dsnu: { pressao: safe(Pdsnu), carga: safe(Cdsnu) },\n  dsbc: { pressao: safe(Pdsbc), carga: safe(Cdsbc) }\n});\n\n// resposta amigável\nmsg.payload = {\n  ok: true,\n  saved: {\n    dsnu: { pressao: safe(Pdsnu), carga: safe(Cdsnu) },\n    dsbc: { pressao: safe(Pdsbc), carga: safe(Cdsbc) }\n  }\n};\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 780,
+        "y": 460,
+        "wires": [
+            [
+                "798c89c9427b4356"
+            ]
+        ]
+    },
+    {
+        "id": "1529298c30e34a84",
+        "type": "http in",
+        "z": "9bbf5a29dc9413b2",
+        "name": "",
+        "url": "/sim/input",
+        "method": "post",
+        "upload": false,
+        "skipBodyParsing": false,
+        "swaggerDoc": "",
+        "x": 400,
+        "y": 460,
+        "wires": [
+            [
+                "277bf986a3f7f673"
+            ]
+        ]
+    },
+    {
+        "id": "277bf986a3f7f673",
+        "type": "json",
+        "z": "9bbf5a29dc9413b2",
+        "name": "",
+        "property": "payload",
+        "action": "obj",
+        "pretty": false,
+        "x": 590,
+        "y": 460,
+        "wires": [
+            [
+                "d86c40ab217f1190"
+            ]
+        ]
+    },
+    {
+        "id": "798c89c9427b4356",
+        "type": "http response",
+        "z": "9bbf5a29dc9413b2",
+        "name": "",
+        "statusCode": "",
+        "headers": {},
+        "x": 970,
+        "y": 460,
+        "wires": []
+    }
+]
